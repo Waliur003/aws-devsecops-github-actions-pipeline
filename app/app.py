@@ -1,11 +1,28 @@
-def get_message():
-    return "My AWS DevSecOps Pipeline"
+from flask import Flask, jsonify
+
+app = Flask(__name__)
 
 
-def health_check():
-    return "healthy"
+@app.route("/")
+def home():
+    return jsonify(
+        {
+            "message": "AWS DevSecOps GitHub Actions Lab"
+        }
+    )
+
+
+@app.route("/health")
+def health():
+    return jsonify(
+        {
+            "status": "healthy"
+        }
+    )
 
 
 if __name__ == "__main__":
-    print(get_message())
-    print(health_check())
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )
