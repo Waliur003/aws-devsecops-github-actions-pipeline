@@ -3,7 +3,7 @@ def get_message():
 
 
 def health_check():
-    return "healthy"
+    return "broken"
 
 
 if __name__ == "__main__":
