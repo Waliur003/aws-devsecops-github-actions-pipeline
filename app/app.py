@@ -1,5 +1,5 @@
 def get_message():
-    return "GitHub Actions Cloud Engineering Lab"
+    return "My AWS DevSecOps Pipeline"
 
 
 def health_check():

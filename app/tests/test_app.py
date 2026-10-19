@@ -7,7 +7,7 @@ from app import get_message, health_check
 
 
 def test_get_message():
-    assert get_message() == "GitHub Actions Cloud Engineering Lab"
+    assert get_message() == "My AWS DevSecOps Pipeline"
 
 
 def test_health_check():
