@@ -56,7 +56,6 @@ jobs:
 
   docker:
     name: Docker Build and Security Test
-
     needs:
       - test
       - repository-security
@@ -74,7 +73,22 @@ jobs:
             -t aws-devsecops-app:${{ github.sha }} \
             .
 
-      - name: Scan Docker Image
+      - name: Generate Trivy Security Report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: aws-devsecops-app:${{ github.sha }}
+          format: json
+          output: trivy-report.json
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: 0
+
+      - name: Upload Trivy Security Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-report
+          path: trivy-report.json
+
+      - name: Enforce Container Security Gate
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: aws-devsecops-app:${{ github.sha }}
@@ -117,38 +131,49 @@ jobs:
           docker stop devsecops-app || true
           docker rm devsecops-app || true
 
+
   terraform:
-  name: Terraform CI and IaC Security
+    name: Terraform CI and IaC Security
+    needs:
+      - test
+      - repository-security
 
-  needs:
-    - test
-    - repository-security
+    runs-on: ubuntu-latest
 
-  runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-  steps:
-    - name: Checkout Repository
-      uses: actions/checkout@v4
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
 
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v4
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check -recursive
 
-    - name: Terraform Format Check
-      working-directory: terraform
-      run: terraform fmt -check -recursive
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend=false
 
-    - name: Terraform Init
-      working-directory: terraform
-      run: terraform init -backend=false
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
 
-    - name: Terraform Validate
-      working-directory: terraform
-      run: terraform validate
+      - name: Generate Terraform Validation Report
+        working-directory: terraform
+        run: |
+          terraform validate -json > terraform-validation.json
 
-    - name: Checkov IaC Security Scan
-      uses: bridgecrewio/checkov-action@v12
-      with:
-        directory: terraform
-        framework: terraform
-        quiet: true
-        soft_fail: false
+      - name: Upload Terraform Validation Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-validation-report
+          path: terraform/terraform-validation.json
+
+      - name: Checkov IaC Security Scan
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          quiet: true
+          soft_fail: false
