@@ -2,5 +2,12 @@
 *.tfstate
 *.tfstate.*
 *.tfplan
-crash.log
+tfplan
+tfplan.json
+tfplan.txt
+terraform-validation.json
+__pycache__/
+.pytest_cache/
+*.pyc
 .env
+deployment-diagnostics/
