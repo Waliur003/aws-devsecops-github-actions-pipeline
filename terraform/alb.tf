@@ -1,7 +1,8 @@
 resource "aws_lb" "app" {
-  name               = "devsecops-app-alb"
-  internal           = false
-  load_balancer_type = "application"
+  name                       = "devsecops-app-alb"
+  internal                   = false
+  load_balancer_type         = "application"
+  drop_invalid_header_fields = true
 
   security_groups = [
     aws_security_group.alb.id
