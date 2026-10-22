@@ -9,3 +9,10 @@ variable "project_name" {
   type        = string
   default     = "aws-devsecops-pipeline"
 }
+
+variable "container_image" {
+  description = "Docker image URI used by the ECS task"
+  type        = string
+
+  default = "public.ecr.aws/docker/library/python:3.12-slim"
+}
