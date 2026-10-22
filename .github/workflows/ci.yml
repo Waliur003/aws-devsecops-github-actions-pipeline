@@ -1,4 +1,4 @@
-name: CI Pipeline
+name: CI/CD Pipeline
 
 on:
   push:
@@ -185,63 +185,6 @@ jobs:
           soft_fail: false
 
 
-  aws-auth:
-    name: AWS OIDC and Terraform Plan
-
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    needs:
-      - test
-      - repository-security
-      - terraform
-
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Verify AWS Identity
-        run: |
-          aws sts get-caller-identity
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v4
-
-      - name: Terraform Init with S3 Backend
-        working-directory: terraform
-        run: |
-          terraform init \
-            -reconfigure \
-            -input=false
-
-      - name: Terraform Plan
-        working-directory: terraform
-        run: |
-          terraform plan \
-            -out=tfplan \
-            -input=false
-
-      - name: Generate Human-Readable Terraform Plan
-        working-directory: terraform
-        run: |
-          terraform show -no-color tfplan > tfplan.txt
-
-      - name: Upload Terraform Plan
-        uses: actions/upload-artifact@v4
-        with:
-          name: terraform-plan
-          path: |
-            terraform/tfplan
-            terraform/tfplan.txt
-
-
   push-ecr:
     name: Build and Push Image to ECR
 
@@ -252,9 +195,11 @@ jobs:
       - repository-security
       - docker
       - terraform
-      - aws-auth
 
     runs-on: ubuntu-latest
+
+    outputs:
+      image: ${{ steps.image.outputs.image }}
 
     steps:
       - name: Checkout Repository
@@ -274,7 +219,7 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker Image
+      - name: Build ECR Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
@@ -285,7 +230,7 @@ jobs:
             -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
             .
 
-      - name: Generate Trivy ECR Image Report
+      - name: Generate ECR Image Security Report
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
@@ -317,11 +262,202 @@ jobs:
         run: |
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-      - name: Show Pushed Image URI
+      - name: Export Image URI
+        id: image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+
           echo "Image pushed successfully:"
-          echo "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "$IMAGE_URI"
+
+
+  terraform-plan:
+    name: Terraform Plan
+
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    needs:
+      - terraform
+      - push-ecr
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform Init with S3 Backend
+        working-directory: terraform
+        run: |
+          terraform init \
+            -reconfigure \
+            -input=false
+
+      - name: Terraform Plan
+        working-directory: terraform
+        env:
+          CONTAINER_IMAGE: ${{ needs.push-ecr.outputs.image }}
+        run: |
+          echo "Deploying image:"
+          echo "$CONTAINER_IMAGE"
+
+          terraform plan \
+            -var="container_image=$CONTAINER_IMAGE" \
+            -out=tfplan \
+            -input=false
+
+      - name: Generate Human-Readable Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            terraform/tfplan
+            terraform/tfplan.txt
+
+
+  terraform-apply:
+    name: Terraform Apply
+
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    needs:
+      - terraform-plan
+      - push-ecr
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform Init with S3 Backend
+        working-directory: terraform
+        run: |
+          terraform init \
+            -reconfigure \
+            -input=false
+
+      - name: Download Terraform Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply \
+            -input=false \
+            -auto-approve \
+            tfplan
+
+      - name: Show Terraform Outputs
+        working-directory: terraform
+        run: |
+          terraform output
+
+
+  smoke-test:
+    name: ECS Application Smoke Test
+
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    needs:
+      - terraform-apply
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -reconfigure \
+            -input=false
+
+      - name: Get Load Balancer DNS
+        id: alb
+        working-directory: terraform
+        run: |
+          ALB_DNS=$(terraform output -raw load_balancer_dns)
+
+          echo "dns=$ALB_DNS" >> "$GITHUB_OUTPUT"
+
+          echo "ALB DNS:"
+          echo "$ALB_DNS"
+
+      - name: Test Application Health
+        env:
+          ALB_DNS: ${{ steps.alb.outputs.dns }}
+        run: |
+          echo "Testing:"
+          echo "http://$ALB_DNS/health"
+
+          for i in {1..20}; do
+            if curl --fail --silent --show-error "http://$ALB_DNS/health"; then
+              echo
+              echo "ECS application is healthy."
+              exit 0
+            fi
+
+            echo "Waiting for ECS service and ALB target..."
+            sleep 15
+          done
+
+          echo "Application failed ALB health check."
+          exit 1
+
+      - name: Test Application Home Page
+        env:
+          ALB_DNS: ${{ steps.alb.outputs.dns }}
+        run: |
+          curl --fail --silent --show-error "http://$ALB_DNS/"
