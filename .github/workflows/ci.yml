@@ -34,9 +34,33 @@ jobs:
           pytest app/tests/
 
 
-  docker:
-    name: Docker Build and Test
+  repository-security:
+    name: Repository Security Scan
     needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Trivy Repository Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+
+  docker:
+    name: Docker Build and Security Test
+
+    needs:
+      - test
+      - repository-security
+
     runs-on: ubuntu-latest
 
     steps:
@@ -50,9 +74,14 @@ jobs:
             -t aws-devsecops-app:${{ github.sha }} \
             .
 
-      - name: Inspect Docker Image
-        run: |
-          docker images
+      - name: Scan Docker Image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: aws-devsecops-app:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
 
       - name: Run Docker Container
         run: |
