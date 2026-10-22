@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "TerraformStateBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::<YOUR_TERRAFORM_STATE_BUCKET>"
+    },
+    {
+      "Sid": "TerraformStateObjects",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::<YOUR_TERRAFORM_STATE_BUCKET>/dev/terraform.tfstate",
+        "arn:aws:s3:::<YOUR_TERRAFORM_STATE_BUCKET>/dev/terraform.tfstate.tflock"
+      ]
+    }
+  ]
+}

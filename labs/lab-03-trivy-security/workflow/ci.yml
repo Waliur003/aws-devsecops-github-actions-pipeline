@@ -1,0 +1,60 @@
+name: Lab 3 - Trivy Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  repository-security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy Repository Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+  docker-security:
+    needs: repository-security
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Image
+        run: docker build -f docker/Dockerfile -t aws-devsecops-app:${{ github.sha }} .
+
+      - name: Generate JSON Report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: aws-devsecops-app:${{ github.sha }}
+          format: json
+          output: trivy-report.json
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trivy-security-report
+          path: trivy-report.json
+
+      - name: Enforce Security Gate
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: aws-devsecops-app:${{ github.sha }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1

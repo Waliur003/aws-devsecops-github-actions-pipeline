@@ -1,0 +1,326 @@
+name: Lab 8 - Reliable DevSecOps Deployment
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          pip install -r app/requirements.txt
+          pytest app/tests/
+
+  security:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+  terraform-static:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v4
+      - working-directory: terraform
+        run: terraform fmt -check -recursive
+      - working-directory: terraform
+        run: terraform init -backend=false -input=false
+      - working-directory: terraform
+        run: terraform validate
+      - uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          quiet: true
+          soft_fail: false
+
+  push-ecr:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [security, terraform-static]
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - id: image-check
+        env:
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: |
+          if aws ecr describe-images \
+            --repository-name "$REPOSITORY" \
+            --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and Scan Image
+        if: steps.image-check.outputs.exists != 'true'
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: docker build -f docker/Dockerfile -t "$REGISTRY/$REPOSITORY:$TAG" .
+
+      - name: Trivy Image Gate
+        if: steps.image-check.outputs.exists != 'true'
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+      - name: Push Image
+        if: steps.image-check.outputs.exists != 'true'
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: docker push "$REGISTRY/$REPOSITORY:$TAG"
+
+      - id: image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: echo "image=$REGISTRY/$REPOSITORY:$TAG" >> "$GITHUB_OUTPUT"
+
+  terraform-plan:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: push-ecr
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+
+      - working-directory: terraform
+        run: terraform init -reconfigure -input=false
+
+      - working-directory: terraform
+        env:
+          CONTAINER_IMAGE: ${{ needs.push-ecr.outputs.image }}
+        run: |
+          terraform plan \
+            -var="container_image=$CONTAINER_IMAGE" \
+            -out=tfplan \
+            -input=false
+
+          terraform show -json tfplan > tfplan.json
+
+      - name: Destructive Change Gate
+        working-directory: terraform
+        run: |
+          python ../labs/lab-08-deployment-reliability/scripts/terraform-safety-gate.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            terraform/tfplan
+            terraform/tfplan.json
+
+  terraform-apply:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: terraform-plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v4
+      - working-directory: terraform
+        run: terraform init -reconfigure -input=false
+      - uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform
+      - working-directory: terraform
+        run: terraform apply -auto-approve -input=false tfplan
+
+  verify:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v4
+
+      - working-directory: terraform
+        run: terraform init -reconfigure -input=false
+
+      - name: Read Deployment Data
+        id: deployment
+        working-directory: terraform
+        run: |
+          echo "cluster=$(terraform output -raw ecs_cluster_name)" >> "$GITHUB_OUTPUT"
+          echo "service=$(terraform output -raw ecs_service_name)" >> "$GITHUB_OUTPUT"
+          echo "dns=$(terraform output -raw load_balancer_dns)" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for ECS Stability
+        env:
+          CLUSTER: ${{ steps.deployment.outputs.cluster }}
+          SERVICE: ${{ steps.deployment.outputs.service }}
+        run: aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+
+      - name: Verify Running Image
+        id: verify-image
+        env:
+          CLUSTER: ${{ steps.deployment.outputs.cluster }}
+          SERVICE: ${{ steps.deployment.outputs.service }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          TASK_ARN=$(aws ecs list-tasks \
+            --cluster "$CLUSTER" \
+            --service-name "$SERVICE" \
+            --desired-status RUNNING \
+            --query 'taskArns[0]' \
+            --output text)
+
+          TASK_DEF=$(aws ecs describe-tasks \
+            --cluster "$CLUSTER" \
+            --tasks "$TASK_ARN" \
+            --query 'tasks[0].taskDefinitionArn' \
+            --output text)
+
+          IMAGE=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_DEF" \
+            --query 'taskDefinition.containerDefinitions[?name==`devsecops-app`].image | [0]' \
+            --output text)
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+          case "$IMAGE" in
+            *":$EXPECTED_SHA") echo "Image verified" ;;
+            *) echo "Wrong image deployed"; exit 1 ;;
+          esac
+
+      - name: Smoke Test
+        env:
+          ALB_DNS: ${{ steps.deployment.outputs.dns }}
+        run: |
+          curl --fail "http://$ALB_DNS/health"
+          curl --fail "http://$ALB_DNS/"
+
+      - name: Deployment Summary
+        env:
+          ALB_DNS: ${{ steps.deployment.outputs.dns }}
+          IMAGE: ${{ steps.verify-image.outputs.image }}
+        run: |
+          {
+            echo "# AWS DevSecOps Deployment"
+            echo
+            echo "| Item | Result |"
+            echo "|---|---|"
+            echo "| Status | ✅ Successful |"
+            echo "| Git SHA | \`${{ github.sha }}\` |"
+            echo "| Running Image | \`$IMAGE\` |"
+            echo "| ECS Stability | ✅ Stable |"
+            echo "| Health Check | ✅ Passed |"
+            echo
+            echo "Application: http://$ALB_DNS/"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect Failure Diagnostics
+        if: failure()
+        env:
+          CLUSTER: ${{ steps.deployment.outputs.cluster }}
+          SERVICE: ${{ steps.deployment.outputs.service }}
+        run: |
+          mkdir -p deployment-diagnostics
+
+          aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --output json \
+            > deployment-diagnostics/ecs-service.json || true
+
+          aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].events[0:20].[createdAt,message]' \
+            --output table \
+            > deployment-diagnostics/service-events.txt || true
+
+          STOPPED=$(aws ecs list-tasks \
+            --cluster "$CLUSTER" \
+            --service-name "$SERVICE" \
+            --desired-status STOPPED \
+            --query 'taskArns[:10]' \
+            --output text || true)
+
+          if [ -n "$STOPPED" ] && [ "$STOPPED" != "None" ]; then
+            aws ecs describe-tasks \
+              --cluster "$CLUSTER" \
+              --tasks $STOPPED \
+              --output json \
+              > deployment-diagnostics/stopped-tasks.json || true
+          fi
+
+          START_TIME=$(( $(date +%s) * 1000 - 900000 ))
+
+          aws logs filter-log-events \
+            --log-group-name "/ecs/aws-devsecops-pipeline" \
+            --start-time "$START_TIME" \
+            --limit 100 \
+            --output text \
+            > deployment-diagnostics/cloudwatch-logs.txt || true
+
+      - name: Upload Failure Diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-diagnostics
+          path: deployment-diagnostics/
+          if-no-files-found: warn

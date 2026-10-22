@@ -1,0 +1,44 @@
+name: Lab 2 - Docker CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker Image
+        run: docker build -f docker/Dockerfile -t aws-devsecops-app:${{ github.sha }} .
+
+      - name: Run Container
+        run: docker run -d --name devsecops-app -p 5000:5000 aws-devsecops-app:${{ github.sha }}
+
+      - name: Health Check
+        run: |
+          for i in {1..10}; do
+            if curl --fail http://localhost:5000/health; then
+              echo "Application is healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
+      - name: Show Logs
+        if: always()
+        run: docker logs devsecops-app || true
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop devsecops-app || true
+          docker rm devsecops-app || true
