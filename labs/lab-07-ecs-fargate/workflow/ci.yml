@@ -1,0 +1,147 @@
+name: Lab 7 - ECS Fargate Deployment
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  push-ecr:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Check Image
+        id: image-check
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build Image
+        if: steps.image-check.outputs.exists != 'true'
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: docker build -f docker/Dockerfile -t "$REGISTRY/$REPOSITORY:$TAG" .
+
+      - name: Push Image
+        if: steps.image-check.outputs.exists != 'true'
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: docker push "$REGISTRY/$REPOSITORY:$TAG"
+
+      - name: Export Image
+        id: image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          TAG: ${{ github.sha }}
+        run: echo "image=$REGISTRY/$REPOSITORY:$TAG" >> "$GITHUB_OUTPUT"
+
+  terraform-plan:
+    needs: push-ecr
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+
+      - working-directory: terraform
+        run: terraform init -reconfigure -input=false
+
+      - working-directory: terraform
+        env:
+          CONTAINER_IMAGE: ${{ needs.push-ecr.outputs.image }}
+        run: terraform plan -var="container_image=$CONTAINER_IMAGE" -out=tfplan -input=false
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform/tfplan
+
+  terraform-apply:
+    needs: terraform-plan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+
+      - working-directory: terraform
+        run: terraform init -reconfigure -input=false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: terraform
+
+      - working-directory: terraform
+        run: terraform apply -auto-approve -input=false tfplan
+
+  smoke-test:
+    needs: terraform-apply
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: hashicorp/setup-terraform@v4
+
+      - working-directory: terraform
+        run: terraform init -reconfigure -input=false
+
+      - name: Test ALB
+        working-directory: terraform
+        run: |
+          ALB_DNS=$(terraform output -raw load_balancer_dns)
+
+          for i in {1..20}; do
+            if curl --fail "http://$ALB_DNS/health"; then
+              exit 0
+            fi
+            sleep 15
+          done
+
+          exit 1
