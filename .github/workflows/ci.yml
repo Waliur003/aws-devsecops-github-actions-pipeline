@@ -426,7 +426,7 @@ jobs:
 
 
   smoke-test:
-    name: ECS Application Smoke Test
+    name: ECS Deployment Verification
 
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -455,20 +455,49 @@ jobs:
             -reconfigure \
             -input=false
 
-      - name: Get Load Balancer DNS
-        id: alb
+      - name: Get Deployment Information
+        id: deployment
         working-directory: terraform
         run: |
+          ECS_CLUSTER=$(terraform output -raw ecs_cluster_name)
+          ECS_SERVICE=$(terraform output -raw ecs_service_name)
           ALB_DNS=$(terraform output -raw load_balancer_dns)
 
+          echo "cluster=$ECS_CLUSTER" >> "$GITHUB_OUTPUT"
+          echo "service=$ECS_SERVICE" >> "$GITHUB_OUTPUT"
           echo "dns=$ALB_DNS" >> "$GITHUB_OUTPUT"
 
-          echo "ALB DNS:"
-          echo "$ALB_DNS"
+          echo "ECS Cluster: $ECS_CLUSTER"
+          echo "ECS Service: $ECS_SERVICE"
+          echo "ALB DNS: $ALB_DNS"
+
+      - name: Wait for ECS Service Stability
+        env:
+          ECS_CLUSTER: ${{ steps.deployment.outputs.cluster }}
+          ECS_SERVICE: ${{ steps.deployment.outputs.service }}
+        run: |
+          echo "Waiting for ECS service to become stable..."
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+
+          echo "ECS service is stable."
+
+      - name: Show ECS Deployment Status
+        env:
+          ECS_CLUSTER: ${{ steps.deployment.outputs.cluster }}
+          ECS_SERVICE: ${{ steps.deployment.outputs.service }}
+        run: |
+          aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].deployments[*].{Status:status,RolloutState:rolloutState,Desired:desiredCount,Running:runningCount,Pending:pendingCount,TaskDefinition:taskDefinition}' \
+            --output table
 
       - name: Test Application Health
         env:
-          ALB_DNS: ${{ steps.alb.outputs.dns }}
+          ALB_DNS: ${{ steps.deployment.outputs.dns }}
         run: |
           echo "Testing:"
           echo "http://$ALB_DNS/health"
@@ -480,7 +509,7 @@ jobs:
               exit 0
             fi
 
-            echo "Waiting for ECS service and ALB target..."
+            echo "Waiting for application..."
             sleep 15
           done
 
@@ -489,6 +518,6 @@ jobs:
 
       - name: Test Application Home Page
         env:
-          ALB_DNS: ${{ steps.alb.outputs.dns }}
+          ALB_DNS: ${{ steps.deployment.outputs.dns }}
         run: |
           curl --fail --silent --show-error "http://$ALB_DNS/"
