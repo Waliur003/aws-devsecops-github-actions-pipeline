@@ -132,12 +132,21 @@ resource "aws_iam_role_policy" "vpc_flow_logs" {
 
     Statement = [
       {
+        Sid    = "WriteVPCFlowLogs"
         Effect = "Allow"
 
         Action = [
-          "logs:CreateLogGroup",
           "logs:CreateLogStream",
-          "logs:PutLogEvents",
+          "logs:PutLogEvents"
+        ]
+
+        Resource = "${aws_cloudwatch_log_group.vpc_flow_logs.arn}:*"
+      },
+      {
+        Sid    = "DescribeCloudWatchLogs"
+        Effect = "Allow"
+
+        Action = [
           "logs:DescribeLogGroups",
           "logs:DescribeLogStreams"
         ]

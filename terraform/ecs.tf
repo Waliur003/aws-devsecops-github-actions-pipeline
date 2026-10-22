@@ -57,6 +57,8 @@ resource "aws_ecs_task_definition" "app" {
 
 
 resource "aws_ecs_service" "app" {
+  #checkov:skip=CKV_AWS_333:Public IP is intentionally used in this low-cost lab to avoid NAT Gateway cost. Production ECS tasks should use private subnets.
+
   name    = "${var.project_name}-service"
   cluster = aws_ecs_cluster.main.id
 
