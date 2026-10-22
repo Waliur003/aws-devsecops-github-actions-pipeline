@@ -64,7 +64,6 @@ jobs:
 
   docker:
     name: Docker Build and Security Test
-
     needs:
       - test
       - repository-security
@@ -126,13 +125,11 @@ jobs:
             sleep 2
           done
 
-          echo "Application failed health check"
           exit 1
 
       - name: Show Container Logs
         if: always()
-        run: |
-          docker logs devsecops-app || true
+        run: docker logs devsecops-app || true
 
       - name: Cleanup Container
         if: always()
@@ -143,7 +140,6 @@ jobs:
 
   terraform:
     name: Terraform CI and IaC Security
-
     needs:
       - test
       - repository-security
@@ -171,8 +167,7 @@ jobs:
 
       - name: Generate Terraform Validation Report
         working-directory: terraform
-        run: |
-          terraform validate -json > terraform-validation.json
+        run: terraform validate -json > terraform-validation.json
 
       - name: Upload Terraform Validation Report
         uses: actions/upload-artifact@v4
@@ -216,8 +211,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS Identity
-        run: |
-          aws sts get-caller-identity
+        run: aws sts get-caller-identity
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -233,16 +227,10 @@ jobs:
             --repository-name "$ECR_REPOSITORY" \
             --image-ids imageTag="$IMAGE_TAG" \
             > /dev/null 2>&1; then
-
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Image already exists in ECR."
-            echo "Skipping duplicate push."
-
           else
-
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Image does not exist yet."
-
           fi
 
       - name: Build ECR Image
@@ -254,7 +242,7 @@ jobs:
         run: |
           docker build \
             -f docker/Dockerfile \
-            -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+            -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
             .
 
       - name: Generate ECR Image Security Report
@@ -303,13 +291,11 @@ jobs:
           IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
           echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
-
-          echo "Application image:"
           echo "$IMAGE_URI"
 
 
   terraform-plan:
-    name: Terraform Plan
+    name: Terraform Plan and Safety Gate
 
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
@@ -330,13 +316,12 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS Identity
-        run: |
-          aws sts get-caller-identity
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
 
-      - name: Terraform Init with S3 Backend
+      - name: Terraform Init
         working-directory: terraform
         run: |
           terraform init \
@@ -348,18 +333,73 @@ jobs:
         env:
           CONTAINER_IMAGE: ${{ needs.push-ecr.outputs.image }}
         run: |
-          echo "Deploying image:"
-          echo "$CONTAINER_IMAGE"
-
           terraform plan \
             -var="container_image=$CONTAINER_IMAGE" \
             -out=tfplan \
             -input=false
 
-      - name: Generate Human-Readable Terraform Plan
+      - name: Generate Human Readable Plan
         working-directory: terraform
         run: |
           terraform show -no-color tfplan > tfplan.txt
+
+      - name: Generate Terraform JSON Plan
+        working-directory: terraform
+        run: |
+          terraform show -json tfplan > tfplan.json
+
+      - name: Terraform Destructive Change Safety Gate
+        working-directory: terraform
+        run: |
+          echo "Checking Terraform plan for destructive changes..."
+
+          python <<'PYTHON'
+          import json
+          import sys
+
+          with open("tfplan.json", "r") as f:
+              plan = json.load(f)
+
+          blocked = []
+          allowed = []
+
+          for change in plan.get("resource_changes", []):
+              address = change.get("address", "")
+              actions = change.get("change", {}).get("actions", [])
+
+              destructive = "delete" in actions
+
+              if not destructive:
+                  continue
+
+              if address == "aws_ecs_task_definition.app":
+                  allowed.append((address, actions))
+              else:
+                  blocked.append((address, actions))
+
+          print()
+          print("Allowed destructive/replacement changes:")
+          if allowed:
+              for address, actions in allowed:
+                  print(f"  ALLOWED: {address} -> {actions}")
+          else:
+              print("  None")
+
+          print()
+          print("Blocked destructive/replacement changes:")
+          if blocked:
+              for address, actions in blocked:
+                  print(f"  BLOCKED: {address} -> {actions}")
+
+              print()
+              print("ERROR: Terraform plan contains destructive infrastructure changes.")
+              print("Review the plan before deployment.")
+              sys.exit(1)
+
+          print("  None")
+          print()
+          print("Terraform safety gate passed.")
+          PYTHON
 
       - name: Upload Terraform Plan
         uses: actions/upload-artifact@v4
@@ -368,6 +408,7 @@ jobs:
           path: |
             terraform/tfplan
             terraform/tfplan.txt
+            terraform/tfplan.json
 
 
   terraform-apply:
@@ -392,13 +433,12 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
 
       - name: Verify AWS Identity
-        run: |
-          aws sts get-caller-identity
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v4
 
-      - name: Terraform Init with S3 Backend
+      - name: Terraform Init
         working-directory: terraform
         run: |
           terraform init \
@@ -421,8 +461,7 @@ jobs:
 
       - name: Show Terraform Outputs
         working-directory: terraform
-        run: |
-          terraform output
+        run: terraform output
 
 
   smoke-test:
@@ -499,25 +538,34 @@ jobs:
         env:
           ALB_DNS: ${{ steps.deployment.outputs.dns }}
         run: |
-          echo "Testing:"
-          echo "http://$ALB_DNS/health"
-
           for i in {1..20}; do
-            if curl --fail --silent --show-error "http://$ALB_DNS/health"; then
+
+            if curl \
+              --fail \
+              --silent \
+              --show-error \
+              "http://$ALB_DNS/health"; then
+
               echo
-              echo "ECS application is healthy."
+              echo "Application is healthy."
               exit 0
+
             fi
 
             echo "Waiting for application..."
             sleep 15
+
           done
 
-          echo "Application failed ALB health check."
+          echo "Application health check failed."
           exit 1
 
       - name: Test Application Home Page
         env:
           ALB_DNS: ${{ steps.deployment.outputs.dns }}
         run: |
-          curl --fail --silent --show-error "http://$ALB_DNS/"
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            "http://$ALB_DNS/"
