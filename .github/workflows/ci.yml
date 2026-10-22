@@ -219,7 +219,30 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Check if Image Already Exists
+        id: image-check
+        env:
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" \
+            > /dev/null 2>&1; then
+
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Image already exists in ECR."
+            echo "Skipping duplicate push."
+
+          else
+
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Image does not exist yet."
+
+          fi
+
       - name: Build ECR Image
+        if: steps.image-check.outputs.exists != 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
@@ -231,6 +254,7 @@ jobs:
             .
 
       - name: Generate ECR Image Security Report
+        if: steps.image-check.outputs.exists != 'true'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
@@ -240,12 +264,14 @@ jobs:
           exit-code: 0
 
       - name: Upload ECR Image Security Report
+        if: steps.image-check.outputs.exists != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: trivy-ecr-image-report
           path: trivy-ecr-report.json
 
       - name: Enforce ECR Image Security Gate
+        if: steps.image-check.outputs.exists != 'true'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.login-ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
@@ -255,12 +281,13 @@ jobs:
           exit-code: 1
 
       - name: Push Docker Image to ECR
+        if: steps.image-check.outputs.exists != 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
       - name: Export Image URI
         id: image
@@ -273,7 +300,7 @@ jobs:
 
           echo "image=$IMAGE_URI" >> "$GITHUB_OUTPUT"
 
-          echo "Image pushed successfully:"
+          echo "Application image:"
           echo "$IMAGE_URI"
 
 
