@@ -124,6 +124,8 @@ resource "aws_iam_role" "vpc_flow_logs" {
 
 
 resource "aws_iam_role_policy" "vpc_flow_logs" {
+  #checkov:skip=CKV_AWS_355:CloudWatch Logs Describe APIs require account-level wildcard access; write permissions remain scoped to the VPC Flow Logs log group.
+
   name = "${var.project_name}-vpc-flow-logs-policy"
   role = aws_iam_role.vpc_flow_logs.id
 
