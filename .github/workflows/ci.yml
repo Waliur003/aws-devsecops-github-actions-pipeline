@@ -9,6 +9,10 @@ on:
     branches:
       - main
 
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
 
   test:
@@ -56,6 +60,7 @@ jobs:
 
   docker:
     name: Docker Build and Security Test
+
     needs:
       - test
       - repository-security
@@ -134,6 +139,7 @@ jobs:
 
   terraform:
     name: Terraform CI and IaC Security
+
     needs:
       - test
       - repository-security
@@ -177,3 +183,57 @@ jobs:
           framework: terraform
           quiet: true
           soft_fail: false
+
+
+  aws-auth:
+    name: AWS OIDC and Terraform Plan
+
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    needs:
+      - test
+      - repository-security
+      - terraform
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify AWS Identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend=false
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -out=tfplan \
+            -input=false
+
+      - name: Generate Human-Readable Terraform Plan
+        working-directory: terraform
+        run: |
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            terraform/tfplan
+            terraform/tfplan.txt
