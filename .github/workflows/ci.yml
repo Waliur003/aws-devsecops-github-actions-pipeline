@@ -13,6 +13,10 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: devsecops-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
 
   test:
